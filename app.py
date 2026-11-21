@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3, hashlib, secrets, os, re
+import sqlite3, hashlib, secrets, os, re, html, time
 import pandas as pd
 import joblib
 from sklearn.metrics.pairwise import cosine_similarity
@@ -77,28 +77,46 @@ def normalize_mobile(m):
 def sms_ready():
     return Client is not None and all(os.getenv(x) for x in ['TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_VERIFY_SERVICE_SID'])
 
-def send_sms_otp(m):
+def send_sms_otp(m,purpose='signup'):
+    key=f'{purpose}:{m}'
+    now=time.time()
+    meta=st.session_state.setdefault('otp_meta',{})
+    previous=meta.get(key,{})
+    if now-previous.get('sent_at',0)<30:
+        return False,'Please wait 30 seconds before requesting another OTP.'
     if not sms_ready():
         code=str(secrets.randbelow(900000)+100000)
-        st.session_state.demo_otp=code
-        return True,f'DEMO OTP for local testing: {code}'
+        st.session_state.setdefault('demo_otp_codes',{})[key]=code
+        meta[key]={'sent_at':now,'expires_at':now+600,'attempts':0}
+        msg='OTP sent (demo mode).'
+        if os.getenv('DEMO_MODE','').lower() in {'1','true','yes'}: msg+=f' Debug OTP: {code}'
+        return True,msg
     try:
         c=Client(os.getenv('TWILIO_ACCOUNT_SID'),os.getenv('TWILIO_AUTH_TOKEN'))
         c.verify.services(os.getenv('TWILIO_VERIFY_SERVICE_SID')).verifications.create(to=m,channel='sms')
-        return True,f'Dear customer, the OTP was sent by SMS to {m}.'
+        meta[key]={'sent_at':now,'expires_at':now+600,'attempts':0}
+        return True,'OTP sent by SMS.'
     except Exception as e:
         return False,f'Could not send SMS OTP: {e}'
 
-def verify_sms(m,code):
+def verify_sms(m,code,purpose='signup'):
+    key=f'{purpose}:{m}'
+    meta=st.session_state.setdefault('otp_meta',{}).get(key)
+    if not meta or time.time()>meta.get('expires_at',0): return False,'OTP expired. Request a new OTP.'
+    if meta.get('attempts',0)>=5: return False,'Too many attempts. Request a new OTP.'
+    meta['attempts']=meta.get('attempts',0)+1
     if not sms_ready():
-        expected=st.session_state.get('demo_otp','')
+        expected=st.session_state.setdefault('demo_otp_codes',{}).get(key,'')
         valid=bool(expected) and secrets.compare_digest(expected,code)
-        if valid: st.session_state.demo_otp=''
-        return valid,('Mobile number verified.' if valid else 'Incorrect or expired demo OTP.')
+        if valid:
+            st.session_state.demo_otp_codes.pop(key,None);st.session_state.otp_meta.pop(key,None)
+        return valid,('Mobile number verified.' if valid else 'Incorrect demo OTP.')
     try:
         c=Client(os.getenv('TWILIO_ACCOUNT_SID'),os.getenv('TWILIO_AUTH_TOKEN'))
         r=c.verify.services(os.getenv('TWILIO_VERIFY_SERVICE_SID')).verification_checks.create(to=m,code=code)
-        return r.status=='approved',('Mobile number verified.' if r.status=='approved' else 'Incorrect or expired OTP.')
+        valid=r.status=='approved'
+        if valid: st.session_state.otp_meta.pop(key,None)
+        return valid,('Mobile number verified.' if valid else 'Incorrect or expired OTP.')
     except Exception as e:
         return False,f'OTP verification failed: {e}'
 
@@ -152,7 +170,7 @@ if st.session_state.user is None:
                 if not nm: st.error('Enter a valid Indian mobile number, e.g. +919876543210.')
                 elif row(nm): st.error('This mobile number is already registered. Please use Login.')
                 else:
-                    ok,msg=send_sms_otp(nm)
+                    ok,msg=send_sms_otp(nm,'signup')
                     if ok:
                         st.session_state.reg={'mobile':nm}; st.session_state.reg_step='otp'; st.rerun()
                     else: st.error(msg)
@@ -162,12 +180,12 @@ if st.session_state.user is None:
             st.markdown(f'<div class="otpbox"><h3>📱 OTP verification</h3><p>We sent a 6-digit OTP by SMS to <b>{m}</b>.</p><p>Enter it here to continue. You do not need to go back to Sign Up.</p></div>',unsafe_allow_html=True)
             x=st.text_input(t['otp'],max_chars=6,key='reg_otp',placeholder='6-digit OTP')
             if st.button(t['verify'],key='verify_reg_otp',type='primary',use_container_width=True):
-                ok,msg=verify_sms(m,x.strip())
+                ok,msg=verify_sms(m,x.strip(),'signup')
                 if ok:
                     st.session_state.reg_verified=True; st.session_state.reg_step='profile'; st.success(msg); st.rerun()
                 else: st.error(msg)
             if st.button('🔄 Resend OTP',key='resend_reg_otp'):
-                ok,msg=send_sms_otp(m)
+                ok,msg=send_sms_otp(m,'signup')
                 if ok: st.success(msg)
                 else: st.error(msg)
 
@@ -220,7 +238,7 @@ if st.session_state.user is None:
         st.subheader('📱 Enter OTP sent by SMS')
         x=st.text_input(t['otp'],max_chars=6,key='forgot_otp')
         if st.button(t['verify'],key='fv',type='primary'):
-            ok,msg=verify_sms(st.session_state.forgot_mobile,x.strip())
+            ok,msg=verify_sms(st.session_state.forgot_mobile,x.strip(),'forgot')
             if ok: st.session_state.forgot_verified=True; st.session_state.page='forgot'; st.success(msg); st.rerun()
             else: st.error(msg)
     st.stop()
@@ -255,7 +273,7 @@ with st.sidebar:
         st.session_state.user=None;st.rerun()
 
 # NAV
-st.markdown(f'<div class="nav"><h2>🇮🇳 GovScheme AI</h2><p>👋 {u["name"]} &nbsp; | &nbsp; {u["state"]}</p></div>',unsafe_allow_html=True)
+st.markdown(f'<div class="nav"><h2>🇮🇳 GovScheme AI</h2><p>👋 {html.escape(str(u["name"]))} &nbsp; | &nbsp; {html.escape(str(u["state"]))}</p></div>',unsafe_allow_html=True)
 _,find_nav,_=st.columns([1,1.3,1])
 if find_nav.button('🔎 '+t['find'],type='primary',use_container_width=True):
     st.session_state.page='find'
