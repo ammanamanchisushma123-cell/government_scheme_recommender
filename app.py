@@ -207,7 +207,7 @@ if st.session_state.user is None:
             p1=st.text_input('Set Password',type='password',key='reg_p1'); p2=st.text_input('Confirm Password',type='password',key='reg_p2')
             if st.button('Create Account & Continue',type='primary',use_container_width=True):
                 if not d.get('name','').strip(): st.warning('Enter your full name.')
-                elif len(p1)<6: st.warning('Password must contain at least 6 characters.')
+                elif len(p1)<8: st.warning('Password must contain at least 8 characters.')
                 elif p1!=p2: st.error('Passwords do not match.')
                 elif save_user(d,p1):
                     st.session_state.user=ud(row(d['mobile'])); st.session_state.lang=d['language']
@@ -224,16 +224,16 @@ if st.session_state.user is None:
                 if not nm: st.error('Enter a valid Indian mobile number.')
                 elif not row(nm): st.error('No account found.')
                 else:
-                    ok,msg=send_sms_otp(nm)
+                    ok,msg=send_sms_otp(nm,'forgot')
                     if ok: st.session_state.forgot_mobile=nm; st.session_state.page='forgot_otp'; st.rerun()
                     else: st.error(msg)
         else:
             p1=st.text_input('New Password',type='password',key='fp1'); p2=st.text_input('Confirm New Password',type='password',key='fp2')
             if st.button('Reset Password',type='primary'):
-                if len(p1)>=6 and p1==p2:
+                if len(p1)>=8 and p1==p2:
                     setpw(st.session_state.forgot_mobile,p1); st.success('Password reset successfully. You can now log in.')
-                    st.session_state.forgot_verified=False; st.session_state.page='home'
-                else: st.error('Passwords must match and contain at least 6 characters.')
+                    st.session_state.forgot_mobile=None; st.session_state.forgot_verified=False; st.session_state.page='login'
+                else: st.error('Passwords must match and contain at least 8 characters.')
     if st.session_state.page=='forgot_otp':
         st.subheader('📱 Enter OTP sent by SMS')
         x=st.text_input(t['otp'],max_chars=6,key='forgot_otp')
@@ -307,17 +307,22 @@ if st.session_state.page=='find':
     c1,c2,c3=st.columns(3)
     with c1:s=st.selectbox(t['state'],STATES,index=STATES.index(u['state']) if u['state'] in STATES else 0);occ=st.selectbox(t['occupation'],OCC,index=OCC.index(u['occupation']) if u['occupation'] in OCC else 0)
     with c2:inc=st.selectbox(t['income'],INC,index=INC.index(u['income']) if u['income'] in INC else 0);cat=st.selectbox(t['category'],CAT,index=CAT.index(u['category']) if u['category'] in CAT else 0)
-    with c3:res=st.selectbox(t['res'],['Urban','Rural'],index=['Urban','Rural'].index(u['residence']) if u['residence'] in ['Urban','Rural'] else 0);age=st.number_input(t['age'],1,120,int(u['age'] or 20))
+    with c3:res=st.selectbox(t['res'],['Urban','Rural'],index=['Urban','Rural'].index(u['residence']) if u['residence'] in ['Urban','Rural'] else 0);age=st.number_input(t['age'],1,120,(lambda v: v if isinstance(v,int) and 1<=v<=120 else 20)(u['age']))
     category_filter=st.selectbox('Scheme Category (optional)',['All Categories']+list(CATEGORY_COUNTS.keys()))
     if st.button('🎯 '+t['findme'],type='primary',use_container_width=True):
         if not q.strip():st.warning('Please describe your requirement.')
         else:
             text=f'State {s}; Age {age}; Occupation {occ}; Income {inc}; Category {cat}; Residence {res}; Requirement {q}'
             scores=cosine_similarity(vec.transform([text]),mat).flatten()
+            eligible=np.arange(len(df))
             if category_filter!='All Categories' and 'schemeCategory' in df.columns:
-                mask=df['schemeCategory'].astype(str).str.contains(category_filter.split(',')[0],case=False,na=False)
-                scores[~mask]=-1
-            idx=scores.argsort()[-8:][::-1];st.session_state.results=(df.iloc[idx].copy(),scores[idx]);st.session_state.page='results';st.rerun()
+                mask=df['schemeCategory'].astype(str).str.strip().eq(category_filter)
+                eligible=np.flatnonzero(mask.to_numpy())
+            if len(eligible)==0:
+                st.warning('No schemes in this category. Try another category.')
+            else:
+                ranked=eligible[np.argsort(scores[eligible])[-min(8,len(eligible)):][::-1]]
+                st.session_state.results=(df.iloc[ranked].copy(),scores[ranked]);st.session_state.page='results';st.rerun()
 
 # RESULTS
 if st.session_state.page=='results' and st.session_state.results:
@@ -354,7 +359,8 @@ if st.session_state.page=='profile':
         for k,lbl in pairs:col.write(f'**{lbl}:** {u[k]}')
     st.divider();st.subheader('Change Password');old=st.text_input('Current Password',type='password');p1=st.text_input('New Password',type='password');p2=st.text_input('Confirm New Password',type='password')
     if st.button('Update Password'):
-        if auth(u['mobile'],old) and len(p1)>=6 and p1==p2:setpw(u['mobile'],p1);st.success('Password updated.')
+        if auth(u['mobile'],old) and len(p1)>=8 and p1==p2:
+            setpw(u['mobile'],p1);st.session_state.user=ud(row(u['mobile']));u=st.session_state.user;st.success('Password updated.')
         else:st.error('Current password is wrong or new passwords are invalid.')
 
 # AI
