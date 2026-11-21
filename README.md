@@ -23,7 +23,7 @@ python -m streamlit run app.py
 ```
 
 ### Important OTP note
-The local version uses a **demo OTP** displayed in the app. It is not real SMS authentication. For production, connect the OTP function to an SMS provider such as Firebase/MSG91/Twilio and never display the OTP.
+The local version uses a **demo OTP** (not real SMS). By default, the code is not displayed in the UI. For local debugging only, set `DEMO_MODE=1` to reveal it. Demo OTPs expire after 10 minutes, verification is limited to 5 attempts, and resend is rate-limited to 30 seconds. For real SMS, configure Twilio Verify. Never expose OTPs or credentials in production.
 
 ### Enable real SMS with Twilio
 Create a Twilio Verify Service, then set these variables in the same PowerShell window before starting Streamlit:
