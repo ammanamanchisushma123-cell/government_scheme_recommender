@@ -39,14 +39,17 @@ L={
 for x in LANGS:
     if x not in L:L[x]=L['English']
 
-def db(): return sqlite3.connect(DB)
+def db():
+    c=sqlite3.connect(DB)
+    c.row_factory=sqlite3.Row
+    return c
 def init():
     c=db(); c.execute('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,mobile TEXT UNIQUE,email TEXT,age INTEGER,gender TEXT,state TEXT,district TEXT,residence TEXT,occupation TEXT,income TEXT,category TEXT,disability TEXT,language TEXT,password_hash TEXT,salt TEXT)'''); c.execute('''CREATE TABLE IF NOT EXISTS saved(user_id INTEGER,scheme_name TEXT,UNIQUE(user_id,scheme_name))'''); c.commit(); c.close()
 def hp(p,s=None):
     s=s or secrets.token_hex(16); return hashlib.pbkdf2_hmac('sha256',p.encode(),s.encode(),120000).hex(),s
 def row(m):
     c=db(); r=c.execute('SELECT * FROM users WHERE mobile=?',(m,)).fetchone(); c.close(); return r
-def ud(r): return {'id':r[0],'name':r[1],'mobile':r[2],'email':r[3],'age':r[4],'gender':r[5],'state':r[6],'district':r[7],'residence':r[8],'occupation':r[9],'income':r[10],'category':r[11],'disability':r[12],'language':r[13]}
+def ud(r): return {'id':r['id'],'name':r['name'],'mobile':r['mobile'],'email':r['email'],'age':r['age'],'gender':r['gender'],'state':r['state'],'district':r['district'],'residence':r['residence'],'occupation':r['occupation'],'income':r['income'],'category':r['category'],'disability':r['disability'],'language':r['language']}
 def save_user(d,p):
     h,s=hp(p); c=db()
     try:c.execute('INSERT INTO users(name,mobile,email,age,gender,state,district,residence,occupation,income,category,disability,language,password_hash,salt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(d['name'],d['mobile'],d['email'],d['age'],d['gender'],d['state'],d['district'],d['residence'],d['occupation'],d['income'],d['category'],d['disability'],d['language'],h,s));c.commit();return True
@@ -54,8 +57,8 @@ def save_user(d,p):
     finally:c.close()
 def auth(m,p):
     r=row(m)
-    if not r or not r[14]:return None
-    h,_=hp(p,r[15]); return ud(r) if secrets.compare_digest(h,r[14]) else None
+    if not r or not r['password_hash'] or not r['salt']:return None
+    h,_=hp(p,r['salt']); return ud(r) if secrets.compare_digest(h,r['password_hash']) else None
 def setpw(m,p):
     h,s=hp(p);c=db();c.execute('UPDATE users SET password_hash=?,salt=? WHERE mobile=?',(h,s,m));c.commit();c.close()
 def saved(uid):
