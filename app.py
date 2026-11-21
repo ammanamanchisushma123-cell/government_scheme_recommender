@@ -1,5 +1,6 @@
 import streamlit as st
-import sqlite3, hashlib, secrets, os, re
+import sqlite3, hashlib, secrets, os, re, html, time
+import numpy as np
 import pandas as pd
 import joblib
 from sklearn.metrics.pairwise import cosine_similarity
@@ -38,14 +39,17 @@ L={
 for x in LANGS:
     if x not in L:L[x]=L['English']
 
-def db(): return sqlite3.connect(DB)
+def db():
+    c=sqlite3.connect(DB)
+    c.row_factory=sqlite3.Row
+    return c
 def init():
     c=db(); c.execute('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,mobile TEXT UNIQUE,email TEXT,age INTEGER,gender TEXT,state TEXT,district TEXT,residence TEXT,occupation TEXT,income TEXT,category TEXT,disability TEXT,language TEXT,password_hash TEXT,salt TEXT)'''); c.execute('''CREATE TABLE IF NOT EXISTS saved(user_id INTEGER,scheme_name TEXT,UNIQUE(user_id,scheme_name))'''); c.commit(); c.close()
 def hp(p,s=None):
     s=s or secrets.token_hex(16); return hashlib.pbkdf2_hmac('sha256',p.encode(),s.encode(),120000).hex(),s
 def row(m):
     c=db(); r=c.execute('SELECT * FROM users WHERE mobile=?',(m,)).fetchone(); c.close(); return r
-def ud(r): return {'id':r[0],'name':r[1],'mobile':r[2],'email':r[3],'age':r[4],'gender':r[5],'state':r[6],'district':r[7],'residence':r[8],'occupation':r[9],'income':r[10],'category':r[11],'disability':r[12],'language':r[13]}
+def ud(r): return {'id':r['id'],'name':r['name'],'mobile':r['mobile'],'email':r['email'],'age':r['age'],'gender':r['gender'],'state':r['state'],'district':r['district'],'residence':r['residence'],'occupation':r['occupation'],'income':r['income'],'category':r['category'],'disability':r['disability'],'language':r['language']}
 def save_user(d,p):
     h,s=hp(p); c=db()
     try:c.execute('INSERT INTO users(name,mobile,email,age,gender,state,district,residence,occupation,income,category,disability,language,password_hash,salt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(d['name'],d['mobile'],d['email'],d['age'],d['gender'],d['state'],d['district'],d['residence'],d['occupation'],d['income'],d['category'],d['disability'],d['language'],h,s));c.commit();return True
@@ -53,8 +57,8 @@ def save_user(d,p):
     finally:c.close()
 def auth(m,p):
     r=row(m)
-    if not r or not r[14]:return None
-    h,_=hp(p,r[15]); return ud(r) if secrets.compare_digest(h,r[14]) else None
+    if not r or not r['password_hash'] or not r['salt']:return None
+    h,_=hp(p,r['salt']); return ud(r) if secrets.compare_digest(h,r['password_hash']) else None
 def setpw(m,p):
     h,s=hp(p);c=db();c.execute('UPDATE users SET password_hash=?,salt=? WHERE mobile=?',(h,s,m));c.commit();c.close()
 def saved(uid):
@@ -77,28 +81,46 @@ def normalize_mobile(m):
 def sms_ready():
     return Client is not None and all(os.getenv(x) for x in ['TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_VERIFY_SERVICE_SID'])
 
-def send_sms_otp(m):
+def send_sms_otp(m,purpose='signup'):
+    key=f'{purpose}:{m}'
+    now=time.time()
+    meta=st.session_state.setdefault('otp_meta',{})
+    previous=meta.get(key,{})
+    if now-previous.get('sent_at',0)<30:
+        return False,'Please wait 30 seconds before requesting another OTP.'
     if not sms_ready():
         code=str(secrets.randbelow(900000)+100000)
-        st.session_state.demo_otp=code
-        return True,f'DEMO OTP for local testing: {code}'
+        st.session_state.setdefault('demo_otp_codes',{})[key]=code
+        meta[key]={'sent_at':now,'expires_at':now+600,'attempts':0}
+        msg='OTP sent (demo mode).'
+        if os.getenv('DEMO_MODE','').lower() in {'1','true','yes'}: msg+=f' Debug OTP: {code}'
+        return True,msg
     try:
         c=Client(os.getenv('TWILIO_ACCOUNT_SID'),os.getenv('TWILIO_AUTH_TOKEN'))
         c.verify.services(os.getenv('TWILIO_VERIFY_SERVICE_SID')).verifications.create(to=m,channel='sms')
-        return True,f'Dear customer, the OTP was sent by SMS to {m}.'
+        meta[key]={'sent_at':now,'expires_at':now+600,'attempts':0}
+        return True,'OTP sent by SMS.'
     except Exception as e:
         return False,f'Could not send SMS OTP: {e}'
 
-def verify_sms(m,code):
+def verify_sms(m,code,purpose='signup'):
+    key=f'{purpose}:{m}'
+    meta=st.session_state.setdefault('otp_meta',{}).get(key)
+    if not meta or time.time()>meta.get('expires_at',0): return False,'OTP expired. Request a new OTP.'
+    if meta.get('attempts',0)>=5: return False,'Too many attempts. Request a new OTP.'
+    meta['attempts']=meta.get('attempts',0)+1
     if not sms_ready():
-        expected=st.session_state.get('demo_otp','')
+        expected=st.session_state.setdefault('demo_otp_codes',{}).get(key,'')
         valid=bool(expected) and secrets.compare_digest(expected,code)
-        if valid: st.session_state.demo_otp=''
-        return valid,('Mobile number verified.' if valid else 'Incorrect or expired demo OTP.')
+        if valid:
+            st.session_state.demo_otp_codes.pop(key,None);st.session_state.otp_meta.pop(key,None)
+        return valid,('Mobile number verified.' if valid else 'Incorrect demo OTP.')
     try:
         c=Client(os.getenv('TWILIO_ACCOUNT_SID'),os.getenv('TWILIO_AUTH_TOKEN'))
         r=c.verify.services(os.getenv('TWILIO_VERIFY_SERVICE_SID')).verification_checks.create(to=m,code=code)
-        return r.status=='approved',('Mobile number verified.' if r.status=='approved' else 'Incorrect or expired OTP.')
+        valid=r.status=='approved'
+        if valid: st.session_state.otp_meta.pop(key,None)
+        return valid,('Mobile number verified.' if valid else 'Incorrect or expired OTP.')
     except Exception as e:
         return False,f'OTP verification failed: {e}'
 
@@ -152,7 +174,7 @@ if st.session_state.user is None:
                 if not nm: st.error('Enter a valid Indian mobile number, e.g. +919876543210.')
                 elif row(nm): st.error('This mobile number is already registered. Please use Login.')
                 else:
-                    ok,msg=send_sms_otp(nm)
+                    ok,msg=send_sms_otp(nm,'signup')
                     if ok:
                         st.session_state.reg={'mobile':nm}; st.session_state.reg_step='otp'; st.rerun()
                     else: st.error(msg)
@@ -162,12 +184,12 @@ if st.session_state.user is None:
             st.markdown(f'<div class="otpbox"><h3>📱 OTP verification</h3><p>We sent a 6-digit OTP by SMS to <b>{m}</b>.</p><p>Enter it here to continue. You do not need to go back to Sign Up.</p></div>',unsafe_allow_html=True)
             x=st.text_input(t['otp'],max_chars=6,key='reg_otp',placeholder='6-digit OTP')
             if st.button(t['verify'],key='verify_reg_otp',type='primary',use_container_width=True):
-                ok,msg=verify_sms(m,x.strip())
+                ok,msg=verify_sms(m,x.strip(),'signup')
                 if ok:
                     st.session_state.reg_verified=True; st.session_state.reg_step='profile'; st.success(msg); st.rerun()
                 else: st.error(msg)
             if st.button('🔄 Resend OTP',key='resend_reg_otp'):
-                ok,msg=send_sms_otp(m)
+                ok,msg=send_sms_otp(m,'signup')
                 if ok: st.success(msg)
                 else: st.error(msg)
 
@@ -189,7 +211,7 @@ if st.session_state.user is None:
             p1=st.text_input('Set Password',type='password',key='reg_p1'); p2=st.text_input('Confirm Password',type='password',key='reg_p2')
             if st.button('Create Account & Continue',type='primary',use_container_width=True):
                 if not d.get('name','').strip(): st.warning('Enter your full name.')
-                elif len(p1)<6: st.warning('Password must contain at least 6 characters.')
+                elif len(p1)<8: st.warning('Password must contain at least 8 characters.')
                 elif p1!=p2: st.error('Passwords do not match.')
                 elif save_user(d,p1):
                     st.session_state.user=ud(row(d['mobile'])); st.session_state.lang=d['language']
@@ -206,21 +228,21 @@ if st.session_state.user is None:
                 if not nm: st.error('Enter a valid Indian mobile number.')
                 elif not row(nm): st.error('No account found.')
                 else:
-                    ok,msg=send_sms_otp(nm)
+                    ok,msg=send_sms_otp(nm,'forgot')
                     if ok: st.session_state.forgot_mobile=nm; st.session_state.page='forgot_otp'; st.rerun()
                     else: st.error(msg)
         else:
             p1=st.text_input('New Password',type='password',key='fp1'); p2=st.text_input('Confirm New Password',type='password',key='fp2')
             if st.button('Reset Password',type='primary'):
-                if len(p1)>=6 and p1==p2:
+                if len(p1)>=8 and p1==p2:
                     setpw(st.session_state.forgot_mobile,p1); st.success('Password reset successfully. You can now log in.')
-                    st.session_state.forgot_verified=False; st.session_state.page='home'
-                else: st.error('Passwords must match and contain at least 6 characters.')
+                    st.session_state.forgot_mobile=None; st.session_state.forgot_verified=False; st.session_state.page='login'
+                else: st.error('Passwords must match and contain at least 8 characters.')
     if st.session_state.page=='forgot_otp':
         st.subheader('📱 Enter OTP sent by SMS')
         x=st.text_input(t['otp'],max_chars=6,key='forgot_otp')
         if st.button(t['verify'],key='fv',type='primary'):
-            ok,msg=verify_sms(st.session_state.forgot_mobile,x.strip())
+            ok,msg=verify_sms(st.session_state.forgot_mobile,x.strip(),'forgot')
             if ok: st.session_state.forgot_verified=True; st.session_state.page='forgot'; st.success(msg); st.rerun()
             else: st.error(msg)
     st.stop()
@@ -255,7 +277,7 @@ with st.sidebar:
         st.session_state.user=None;st.rerun()
 
 # NAV
-st.markdown(f'<div class="nav"><h2>🇮🇳 GovScheme AI</h2><p>👋 {u["name"]} &nbsp; | &nbsp; {u["state"]}</p></div>',unsafe_allow_html=True)
+st.markdown(f'<div class="nav"><h2>🇮🇳 GovScheme AI</h2><p>👋 {html.escape(str(u["name"]))} &nbsp; | &nbsp; {html.escape(str(u["state"]))}</p></div>',unsafe_allow_html=True)
 _,find_nav,_=st.columns([1,1.3,1])
 if find_nav.button('🔎 '+t['find'],type='primary',use_container_width=True):
     st.session_state.page='find'
@@ -289,17 +311,22 @@ if st.session_state.page=='find':
     c1,c2,c3=st.columns(3)
     with c1:s=st.selectbox(t['state'],STATES,index=STATES.index(u['state']) if u['state'] in STATES else 0);occ=st.selectbox(t['occupation'],OCC,index=OCC.index(u['occupation']) if u['occupation'] in OCC else 0)
     with c2:inc=st.selectbox(t['income'],INC,index=INC.index(u['income']) if u['income'] in INC else 0);cat=st.selectbox(t['category'],CAT,index=CAT.index(u['category']) if u['category'] in CAT else 0)
-    with c3:res=st.selectbox(t['res'],['Urban','Rural'],index=['Urban','Rural'].index(u['residence']) if u['residence'] in ['Urban','Rural'] else 0);age=st.number_input(t['age'],1,120,int(u['age'] or 20))
+    with c3:res=st.selectbox(t['res'],['Urban','Rural'],index=['Urban','Rural'].index(u['residence']) if u['residence'] in ['Urban','Rural'] else 0);age=st.number_input(t['age'],1,120,(lambda v: v if isinstance(v,int) and 1<=v<=120 else 20)(u['age']))
     category_filter=st.selectbox('Scheme Category (optional)',['All Categories']+list(CATEGORY_COUNTS.keys()))
     if st.button('🎯 '+t['findme'],type='primary',use_container_width=True):
         if not q.strip():st.warning('Please describe your requirement.')
         else:
             text=f'State {s}; Age {age}; Occupation {occ}; Income {inc}; Category {cat}; Residence {res}; Requirement {q}'
             scores=cosine_similarity(vec.transform([text]),mat).flatten()
+            eligible=np.arange(len(df))
             if category_filter!='All Categories' and 'schemeCategory' in df.columns:
-                mask=df['schemeCategory'].astype(str).str.contains(category_filter.split(',')[0],case=False,na=False)
-                scores[~mask]=-1
-            idx=scores.argsort()[-8:][::-1];st.session_state.results=(df.iloc[idx].copy(),scores[idx]);st.session_state.page='results';st.rerun()
+                mask=df['schemeCategory'].astype(str).str.strip().eq(category_filter)
+                eligible=np.flatnonzero(mask.to_numpy())
+            if len(eligible)==0:
+                st.warning('No schemes in this category. Try another category.')
+            else:
+                ranked=eligible[np.argsort(scores[eligible])[-min(8,len(eligible)):][::-1]]
+                st.session_state.results=(df.iloc[ranked].copy(),scores[ranked]);st.session_state.page='results';st.rerun()
 
 # RESULTS
 if st.session_state.page=='results' and st.session_state.results:
@@ -336,7 +363,8 @@ if st.session_state.page=='profile':
         for k,lbl in pairs:col.write(f'**{lbl}:** {u[k]}')
     st.divider();st.subheader('Change Password');old=st.text_input('Current Password',type='password');p1=st.text_input('New Password',type='password');p2=st.text_input('Confirm New Password',type='password')
     if st.button('Update Password'):
-        if auth(u['mobile'],old) and len(p1)>=6 and p1==p2:setpw(u['mobile'],p1);st.success('Password updated.')
+        if auth(u['mobile'],old) and len(p1)>=8 and p1==p2:
+            setpw(u['mobile'],p1);st.session_state.user=ud(row(u['mobile']));u=st.session_state.user;st.success('Password updated.')
         else:st.error('Current password is wrong or new passwords are invalid.')
 
 # AI
