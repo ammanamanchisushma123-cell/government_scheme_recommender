@@ -1,5 +1,6 @@
 import streamlit as st
 import sqlite3, hashlib, secrets, os, re, html, time
+import numpy as np
 import pandas as pd
 import joblib
 from sklearn.metrics.pairwise import cosine_similarity
